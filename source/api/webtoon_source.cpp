@@ -1,5 +1,7 @@
 #include "api/webtoon_source.hpp"
 
+#include <algorithm>
+
 #include "net/http_client.hpp"
 #include "util/html_util.hpp"
 
