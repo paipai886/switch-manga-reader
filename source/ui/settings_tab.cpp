@@ -1,0 +1,412 @@
+#include "ui/settings_tab.hpp"
+
+#include <algorithm>
+
+#include "api/source_registry.hpp"
+#include "storage/cache_manager.hpp"
+#include "util/main_thread.hpp"
+#include "util/worker_thread.hpp"
+
+using namespace brls::literals;
+
+namespace ui
+{
+
+namespace
+{
+    constexpr const char* kRatingIds[4] = { "safe", "suggestive", "erotica", "pornographic" };
+    constexpr const char* kRatingLabelKeys[4] = {
+        "settings/rating_safe",
+        "settings/rating_suggestive",
+        "settings/rating_erotica",
+        "settings/rating_pornographic",
+    };
+
+    // MangaDex translatedLanguage/availableTranslatedLanguage codes. Empty
+    // code = no language filter at all (search/browse show every language,
+    // reader chapter list falls back to "en" - see mangadex_client.cpp).
+    struct LanguageOption
+    {
+        const char* code;
+        const char* label;
+    };
+
+    constexpr LanguageOption kLanguages[] = {
+        { "", "Qualquer idioma" },
+        { "pt-br", "Português (Brasil)" },
+        { "en", "English" },
+        { "es", "Español" },
+        { "es-la", "Español (LatAm)" },
+        { "fr", "Français" },
+        { "de", "Deutsch" },
+        { "it", "Italiano" },
+        { "ru", "Русский" },
+        { "ja", "日本語" },
+        { "ko", "한국어" },
+        { "zh", "中文" },
+    };
+    constexpr int kLanguageCount = sizeof(kLanguages) / sizeof(kLanguages[0]);
+
+    // Plain ASCII instead of Material Icons codepoints: the icon font isn't
+    // guaranteed to be loaded (Application logs a warning and skips the
+    // fallback registration if it fails), and testing showed the codepoints
+    // rendering as nothing. These glyphs are guaranteed present in any font.
+    constexpr const char* kIconArrowUp = "^";
+    constexpr const char* kIconArrowDown = "v";
+    constexpr const char* kIconArrowLeft = "<";
+    constexpr const char* kIconArrowRight = ">";
+
+    int findLanguageIndex(const std::string& code)
+    {
+        for (int i = 0; i < kLanguageCount; i++)
+        {
+            if (code == kLanguages[i].code)
+                return i;
+        }
+        return 0;
+    }
+}
+
+SettingsTab::SettingsTab()
+    : brls::Box(brls::Axis::COLUMN)
+{
+    this->settings = storage::LibraryStore::LoadSettings();
+
+    this->setGrow(1.0f);
+    this->setPadding(24.0f, 32.0f, 24.0f, 32.0f);
+
+    brls::Label* ratingsHeader = new brls::Label();
+    ratingsHeader->setText("settings/ratings_header"_i18n);
+    ratingsHeader->setFontSize(22.0f);
+    ratingsHeader->setHorizontalAlign(brls::HorizontalAlign::LEFT);
+    this->addView(ratingsHeader);
+
+    brls::Box* ratingsRow = new brls::Box(brls::Axis::ROW);
+    ratingsRow->setMarginTop(12.0f);
+    ratingsRow->setMarginBottom(24.0f);
+
+    for (int i = 0; i < 4; i++)
+    {
+        brls::Button* button = new brls::Button();
+        button->setText(brls::getStr(kRatingLabelKeys[i]));
+        button->setDimensions(180.0f, 56.0f);
+        button->setMarginRight(12.0f);
+
+        std::string rating = kRatingIds[i];
+        button->registerClickAction([this, rating, button](brls::View*) {
+            this->toggleContentRating(rating, button);
+            return true;
+        });
+
+        this->ratingButtons[i] = button;
+        ratingsRow->addView(button);
+    }
+    this->addView(ratingsRow);
+
+    brls::Label* qualityHeader = new brls::Label();
+    qualityHeader->setText("settings/quality_header"_i18n);
+    qualityHeader->setFontSize(22.0f);
+    qualityHeader->setHorizontalAlign(brls::HorizontalAlign::LEFT);
+    this->addView(qualityHeader);
+
+    brls::Box* qualityRow = new brls::Box(brls::Axis::ROW);
+    qualityRow->setMarginTop(12.0f);
+    qualityRow->setMarginBottom(24.0f);
+
+    this->dataSaverButton = new brls::Button();
+    this->dataSaverButton->setText("settings/quality_data_saver"_i18n);
+    this->dataSaverButton->setDimensions(240.0f, 56.0f);
+    this->dataSaverButton->setMarginRight(12.0f);
+    this->dataSaverButton->registerClickAction([this](brls::View*) {
+        this->setImageQuality("data-saver");
+        return true;
+    });
+    qualityRow->addView(this->dataSaverButton);
+
+    this->dataButton = new brls::Button();
+    this->dataButton->setText("settings/quality_original"_i18n);
+    this->dataButton->setDimensions(240.0f, 56.0f);
+    this->dataButton->registerClickAction([this](brls::View*) {
+        this->setImageQuality("data");
+        return true;
+    });
+    qualityRow->addView(this->dataButton);
+
+    this->addView(qualityRow);
+
+    brls::Label* languageHeader = new brls::Label();
+    languageHeader->setText("settings/language_header"_i18n);
+    languageHeader->setFontSize(22.0f);
+    languageHeader->setHorizontalAlign(brls::HorizontalAlign::LEFT);
+    this->addView(languageHeader);
+
+    brls::Box* languageRow = new brls::Box(brls::Axis::ROW);
+    languageRow->setMarginTop(12.0f);
+    languageRow->setMarginBottom(24.0f);
+    languageRow->setAlignItems(brls::AlignItems::CENTER);
+
+    brls::Button* prevLanguageButton = new brls::Button();
+    prevLanguageButton->setText(kIconArrowLeft);
+    prevLanguageButton->setDimensions(56.0f, 56.0f);
+    prevLanguageButton->setMarginRight(12.0f);
+    prevLanguageButton->registerClickAction([this](brls::View*) {
+        this->cycleLanguage(-1);
+        return true;
+    });
+    languageRow->addView(prevLanguageButton);
+
+    this->languageLabel = new brls::Label();
+    this->languageLabel->setFontSize(18.0f);
+    this->languageLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    this->languageLabel->setDimensions(260.0f, brls::View::AUTO);
+    languageRow->addView(this->languageLabel);
+
+    brls::Button* nextLanguageButton = new brls::Button();
+    nextLanguageButton->setText(kIconArrowRight);
+    nextLanguageButton->setDimensions(56.0f, 56.0f);
+    nextLanguageButton->setMarginLeft(12.0f);
+    nextLanguageButton->registerClickAction([this](brls::View*) {
+        this->cycleLanguage(1);
+        return true;
+    });
+    languageRow->addView(nextLanguageButton);
+
+    this->addView(languageRow);
+
+    brls::Label* sourceHeader = new brls::Label();
+    sourceHeader->setText("settings/source_header"_i18n);
+    sourceHeader->setFontSize(22.0f);
+    sourceHeader->setHorizontalAlign(brls::HorizontalAlign::LEFT);
+    this->addView(sourceHeader);
+
+    brls::Box* sourceRow = new brls::Box(brls::Axis::ROW);
+    sourceRow->setMarginTop(12.0f);
+    sourceRow->setMarginBottom(24.0f);
+    sourceRow->setAlignItems(brls::AlignItems::CENTER);
+
+    brls::Button* prevSourceButton = new brls::Button();
+    prevSourceButton->setText(kIconArrowLeft);
+    prevSourceButton->setDimensions(56.0f, 56.0f);
+    prevSourceButton->setMarginRight(12.0f);
+    prevSourceButton->registerClickAction([this](brls::View*) {
+        this->cycleSource(-1);
+        return true;
+    });
+    sourceRow->addView(prevSourceButton);
+
+    this->sourceLabel = new brls::Label();
+    this->sourceLabel->setFontSize(18.0f);
+    this->sourceLabel->setHorizontalAlign(brls::HorizontalAlign::CENTER);
+    this->sourceLabel->setDimensions(340.0f, brls::View::AUTO);
+    sourceRow->addView(this->sourceLabel);
+
+    brls::Button* nextSourceButton = new brls::Button();
+    nextSourceButton->setText(kIconArrowRight);
+    nextSourceButton->setDimensions(56.0f, 56.0f);
+    nextSourceButton->setMarginLeft(12.0f);
+    nextSourceButton->registerClickAction([this](brls::View*) {
+        this->cycleSource(1);
+        return true;
+    });
+    sourceRow->addView(nextSourceButton);
+
+    this->addView(sourceRow);
+
+    brls::Label* cacheHeader = new brls::Label();
+    cacheHeader->setText("settings/cache_header"_i18n);
+    cacheHeader->setFontSize(22.0f);
+    cacheHeader->setHorizontalAlign(brls::HorizontalAlign::LEFT);
+    this->addView(cacheHeader);
+
+    brls::Box* cacheRow = new brls::Box(brls::Axis::ROW);
+    cacheRow->setMarginTop(12.0f);
+    cacheRow->setAlignItems(brls::AlignItems::CENTER);
+
+    brls::Button* decreaseButton = new brls::Button();
+    decreaseButton->setText(kIconArrowDown);
+    decreaseButton->setDimensions(56.0f, 56.0f);
+    decreaseButton->setMarginRight(12.0f);
+    decreaseButton->registerClickAction([this](brls::View*) {
+        this->adjustCacheLimit(-100);
+        return true;
+    });
+    cacheRow->addView(decreaseButton);
+
+    this->cacheLimitLabel = new brls::Label();
+    this->cacheLimitLabel->setFontSize(18.0f);
+    this->cacheLimitLabel->setMarginRight(12.0f);
+    cacheRow->addView(this->cacheLimitLabel);
+
+    brls::Button* increaseButton = new brls::Button();
+    increaseButton->setText(kIconArrowUp);
+    increaseButton->setDimensions(56.0f, 56.0f);
+    increaseButton->setMarginRight(24.0f);
+    increaseButton->registerClickAction([this](brls::View*) {
+        this->adjustCacheLimit(100);
+        return true;
+    });
+    cacheRow->addView(increaseButton);
+
+    brls::Button* clearButton = new brls::Button();
+    clearButton->setStyle(&brls::BUTTONSTYLE_BORDERED);
+    clearButton->setText("settings/clear_cache_button"_i18n);
+    clearButton->setDimensions(220.0f, 56.0f);
+    clearButton->registerClickAction([this](brls::View*) {
+        this->statusLabel->setText("settings/clearing_cache"_i18n);
+        this->statusLabel->setVisibility(brls::Visibility::VISIBLE);
+
+        util::AliveFlag aliveCopy = this->alive;
+        util::spawnWorkerThread([this, aliveCopy]() {
+            storage::CacheManager::ClearAll();
+            util::runOnMainThread([this, aliveCopy]() {
+                if (aliveCopy->load())
+                {
+                    this->statusLabel->setText("settings/cache_cleared"_i18n);
+                }
+            });
+        });
+        return true;
+    });
+    cacheRow->addView(clearButton);
+
+    this->addView(cacheRow);
+
+    this->statusLabel = new brls::Label();
+    this->statusLabel->setFontSize(16.0f);
+    this->statusLabel->setMarginTop(16.0f);
+    this->statusLabel->setVisibility(brls::Visibility::GONE);
+    this->addView(this->statusLabel);
+
+    this->refreshLabels();
+}
+
+SettingsTab::~SettingsTab()
+{
+    alive->store(false);
+}
+
+brls::View* SettingsTab::create()
+{
+    return new SettingsTab();
+}
+
+void SettingsTab::toggleContentRating(const std::string& rating, brls::Button*)
+{
+    auto& ratings = this->settings.contentRatings;
+    auto it = std::find(ratings.begin(), ratings.end(), rating);
+
+    if (it != ratings.end())
+    {
+        // Always keep at least one rating enabled.
+        if (ratings.size() > 1)
+            ratings.erase(it);
+    }
+    else
+    {
+        ratings.push_back(rating);
+    }
+
+    this->save();
+    this->refreshLabels();
+}
+
+void SettingsTab::setImageQuality(const std::string& quality)
+{
+    this->settings.imageQuality = quality;
+    this->save();
+    this->refreshLabels();
+}
+
+void SettingsTab::adjustCacheLimit(int deltaMB)
+{
+    this->settings.cacheLimitMB = std::max(100, this->settings.cacheLimitMB + deltaMB);
+    this->save();
+    this->refreshLabels();
+}
+
+void SettingsTab::cycleLanguage(int direction)
+{
+    int index = findLanguageIndex(this->settings.preferredLanguage);
+    index = (index + direction + kLanguageCount) % kLanguageCount;
+    this->settings.preferredLanguage = kLanguages[index].code;
+
+    this->save();
+    this->refreshLabels();
+}
+
+void SettingsTab::cycleSource(int direction)
+{
+    // Cycle across every registered source; unavailable ones are skipped so
+    // the picker never selects something known to be broken.
+    const std::vector<api::MangaSource*>& sources = api::SourceRegistry::All();
+    if (sources.empty())
+        return;
+
+    int current = 0;
+    for (size_t i = 0; i < sources.size(); i++)
+    {
+        if (this->settings.source == sources[i]->info().key)
+        {
+            current = static_cast<int>(i);
+            break;
+        }
+    }
+
+    for (int step = 0; step < static_cast<int>(sources.size()); step++)
+    {
+        current = (current + direction + static_cast<int>(sources.size())) % static_cast<int>(sources.size());
+        if (sources[current]->info().available)
+        {
+            this->settings.source = sources[current]->info().key;
+            break;
+        }
+    }
+
+    this->save();
+    this->refreshLabels();
+}
+
+void SettingsTab::refreshLabels()
+{
+    for (int i = 0; i < 4; i++)
+    {
+        bool enabled = std::find(this->settings.contentRatings.begin(), this->settings.contentRatings.end(),
+                           kRatingIds[i])
+            != this->settings.contentRatings.end();
+        this->ratingButtons[i]->setStyle(enabled ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_DEFAULT);
+    }
+
+    bool dataSaver = this->settings.imageQuality != "data";
+    this->dataSaverButton->setStyle(dataSaver ? &brls::BUTTONSTYLE_PRIMARY : &brls::BUTTONSTYLE_DEFAULT);
+    this->dataButton->setStyle(dataSaver ? &brls::BUTTONSTYLE_DEFAULT : &brls::BUTTONSTYLE_PRIMARY);
+
+    this->cacheLimitLabel->setText(std::to_string(this->settings.cacheLimitMB) + " MB");
+
+    this->languageLabel->setText(kLanguages[findLanguageIndex(this->settings.preferredLanguage)].label);
+
+    const std::vector<api::MangaSource*>& sources = api::SourceRegistry::All();
+    for (api::MangaSource* source : sources)
+    {
+        if (this->settings.source == source->info().key)
+        {
+            if (source->info().available)
+            {
+                this->sourceLabel->setText(brls::getStr(source->info().nameKey));
+            }
+            else
+            {
+                // Unavailable sources stay visible but greyed out, so the
+                // user understands why the picker skipped them.
+                this->sourceLabel->setText(brls::getStr(source->info().nameKey) + " (" + brls::getStr(source->info().reasonKey) + ")");
+            }
+            break;
+        }
+    }
+}
+
+void SettingsTab::save()
+{
+    storage::LibraryStore::SaveSettings(this->settings);
+}
+
+} // namespace ui
