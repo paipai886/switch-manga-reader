@@ -9,10 +9,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/devkitpro/devkita64:latest
+      # devkitPro official Docker Hub image (NOT ghcr.io - that tag does not exist)
+      image: devkitpro/devkita64:latest
+      options: --user root
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Ensure helper tools (idempotent)
+        run: |
+          pacman -Sy --noconfirm curl unzip git || true
 
       - name: Restore binary assets from upstream zip
         run: |
