@@ -1,0 +1,42 @@
+name: Build NRO
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/devkitpro/devkita64:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore binary assets from upstream zip
+        run: |
+          set -e
+          curl -fsSL -o /tmp/upstream.zip https://codeload.github.com/gomprime/mangadex-reader/zip/refs/heads/master
+          unzip -q /tmp/upstream.zip -d /tmp/upstream
+          UP=/tmp/upstream/mangadex-reader-master
+          mkdir -p external
+          cp -r "$UP/external/curl-mbedtls" external/
+          cp "$UP/external/cacert.pem" external/cacert.pem
+          cp "$UP/external/json.hpp" external/json.hpp
+          mkdir -p romfs
+          cp "$UP/romfs/cacert.pem" romfs/cacert.pem
+
+      - name: Clone borealis submodule
+        run: |
+          git clone --depth 1 https://github.com/gomprime/mangadex-reader-borealis.git external/borealis
+
+      - name: Build NRO
+        run: |
+          make
+
+      - name: Upload NRO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mangadex-reader
+          path: mangadex-reader.nro
