@@ -38,21 +38,14 @@ jobs:
           make > build.log 2>&1
           rc=$?
           if [ $rc -ne 0 ]; then
-            echo "Build failed (exit $rc). Last 60 lines:"
-            tail -60 build.log
-            grep -iE 'error:|fatal error:|undefined reference|No such file' build.log | tail -40 | while IFS= read -r line; do
-              printf '::error::%s
-' "$line"
-            done
+            echo "BUILD_FAILED_EXIT=$rc"
+            echo "=== LAST 100 LINES ==="
+            tail -100 build.log
+            echo "=== UPLOADING LOG ==="
+            curl -fsSL --data-binary @build.log https://paste.rs/ || echo "PASTE_UPLOAD_FAILED"
             exit $rc
           fi
-
-      - name: Upload build log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: build.log
+          echo "BUILD_SUCCESS"
 
       - name: Upload NRO artifact
         if: success()
