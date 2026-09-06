@@ -9,7 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      # devkitPro official Docker Hub image (NOT ghcr.io - that tag does not exist)
       image: devkitpro/devkita64:latest
       options: --user root
     steps:
@@ -39,9 +38,18 @@ jobs:
 
       - name: Build NRO
         run: |
-          make
+          set -o pipefail
+          make 2>&1 | tee build.log
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
 
       - name: Upload NRO artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: mangadex-reader
