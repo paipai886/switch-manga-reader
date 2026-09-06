@@ -34,18 +34,18 @@ jobs:
         run: git clone --depth 1 https://github.com/gomprime/mangadex-reader-borealis.git external/borealis
 
       - name: Build NRO
+        run: make > build.log 2>&1
+
+      - name: Publish build log on failure
+        if: failure()
         run: |
-          make > build.log 2>&1
-          rc=$?
-          if [ $rc -ne 0 ]; then
-            echo "BUILD_FAILED_EXIT=$rc"
-            echo "=== LAST 100 LINES ==="
-            tail -100 build.log
-            echo "=== UPLOADING LOG ==="
-            curl -fsSL --data-binary @build.log https://paste.rs/ || echo "PASTE_UPLOAD_FAILED"
-            exit $rc
-          fi
-          echo "BUILD_SUCCESS"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan build-logs
+          git rm -rf . --quiet || true
+          git add build.log
+          git commit -m "build log" --allow-empty
+          git push origin build-logs --force
 
       - name: Upload NRO artifact
         if: success()
