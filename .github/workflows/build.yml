@@ -15,13 +15,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Ensure helper tools (idempotent)
-        run: |
-          pacman -Sy --noconfirm curl unzip git || true
+      - name: Ensure helper tools
+        run: pacman -Sy --noconfirm curl unzip git || true
 
       - name: Restore binary assets from upstream zip
         run: |
-          set -e
           curl -fsSL -o /tmp/upstream.zip https://codeload.github.com/gomprime/mangadex-reader/zip/refs/heads/master
           unzip -q /tmp/upstream.zip -d /tmp/upstream
           UP=/tmp/upstream/mangadex-reader-master
@@ -33,13 +31,17 @@ jobs:
           cp "$UP/romfs/cacert.pem" romfs/cacert.pem
 
       - name: Clone borealis submodule
+        run: git clone --depth 1 https://github.com/gomprime/mangadex-reader-borealis.git external/borealis
+
+      - name: Debug environment
         run: |
-          git clone --depth 1 https://github.com/gomprime/mangadex-reader-borealis.git external/borealis
+          pwd
+          ls -la
+          which make
+          make --version | head -1
 
       - name: Build NRO
-        run: |
-          set -o pipefail
-          make 2>&1 | tee build.log
+        run: make > build.log 2>&1
 
       - name: Upload build log on failure
         if: failure()
