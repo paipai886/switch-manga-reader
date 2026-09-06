@@ -33,15 +33,19 @@ jobs:
       - name: Clone borealis submodule
         run: git clone --depth 1 https://github.com/gomprime/mangadex-reader-borealis.git external/borealis
 
-      - name: Debug environment
-        run: |
-          pwd
-          ls -la
-          which make
-          make --version | head -1
-
       - name: Build NRO
-        run: make > build.log 2>&1
+        run: |
+          make > build.log 2>&1
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "Build failed (exit $rc). Last 60 lines:"
+            tail -60 build.log
+            grep -iE 'error:|fatal error:|undefined reference|No such file' build.log | tail -40 | while IFS= read -r line; do
+              printf '::error::%s
+' "$line"
+            done
+            exit $rc
+          fi
 
       - name: Upload build log on failure
         if: failure()
